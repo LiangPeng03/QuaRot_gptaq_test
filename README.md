@@ -23,7 +23,7 @@ You can simply run the `main.py` to reproduce the results in the paper. The impo
   
 - `--model`: the model name (or path to the weights)  
 - `--bsz`: the batch size for PPL evaluation  
-- `--rotate`: whether we want to rotate the model  
+- `--rotate`: whether we want to rotate the model        加了就是QuaRot+
 - `--lm_eval`: whether we want to run LM-Eval for Zero-Shot tasks  
 - `--tasks`: the tasks for LM-Eval  
 - `--cal_dataset`: the calibration dataset for GPTQ quantization  
@@ -45,6 +45,7 @@ You can simply run the `main.py` to reproduce the results in the paper. The impo
 - `--k_groupsize`: The group size for key quantization  
 - `--use_v2`: Turn on GPTQv2 quantization (recommened)
 - `--enable_aq_calibration`: Activation quantization during calibration (recommened)
+- `--asym_calibrate`: 校准集非对称，加了就是GPTAQ，不加就是GPTQ
   
   
 We provide a script `run_llama.sh` to reproduce the results.
