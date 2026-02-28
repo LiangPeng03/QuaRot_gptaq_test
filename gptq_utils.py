@@ -139,17 +139,27 @@ class GPTQ:
 @torch.no_grad()
 def gptq_fwrd(model, dataloader, dev, args):
     '''
-    From GPTQ repo 
-    TODO: Make this function general to support both OPT and LLaMA models
+    From GPTQ repo
+    Support both OPT and LLaMA models
     '''
     logging.info('-----GPTQ Quantization-----')
-    
+
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.model.layers
 
-    model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.norm = model.model.norm.to(dev)
+    # Detect model type
+    if 'opt' in args.model:
+        layers = model.model.decoder.layers
+        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
+        model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
+        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(dev)
+        is_opt = True
+    else:  # LLaMA
+        layers = model.model.layers
+        model.model.embed_tokens = model.model.embed_tokens.to(dev)
+        model.model.norm = model.model.norm.to(dev)
+        is_opt = False
+
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -166,7 +176,8 @@ def gptq_fwrd(model, dataloader, dev, args):
             inps[cache['i']] = inp
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
+            if not is_opt:  # LLaMA has position_ids
+                cache['position_ids'] = kwargs['position_ids']
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -178,27 +189,46 @@ def gptq_fwrd(model, dataloader, dev, args):
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.norm = model.model.norm.cpu()
+    if is_opt:
+        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
+        model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
+        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.cpu()
+    else:
+        model.model.embed_tokens = model.model.embed_tokens.cpu()
+        model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
+    position_ids = cache.get('position_ids', None)
 
     quantizers = {}
-    sequential = [
-                ['self_attn.k_proj.module', 'self_attn.v_proj.module', 'self_attn.q_proj.module'],
-                ['self_attn.o_proj.module'],
-                ['mlp.up_proj.module', 'mlp.gate_proj.module'],
-                ['mlp.down_proj.module']
-            ]
+
+    # Define sequential layers based on model type
+    if is_opt:
+        sequential = [
+            ['self_attn.q_proj.module', 'self_attn.k_proj.module', 'self_attn.v_proj.module'],
+            ['self_attn.out_proj.module'],
+            ['fc1.module'],
+            ['fc2.module']
+        ]
+    else:  # LLaMA
+        sequential = [
+            ['self_attn.k_proj.module', 'self_attn.v_proj.module', 'self_attn.q_proj.module'],
+            ['self_attn.o_proj.module'],
+            ['mlp.up_proj.module', 'mlp.gate_proj.module'],
+            ['mlp.down_proj.module']
+        ]
+
     for i in range(len(layers)):
         print(f'\nLayer {i}:', flush=True, end=' ')
         layer = layers[i].to(dev)
         full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
         for names in sequential:
-            subset = {n: full[n] for n in names}
+            subset = {n: full[n] for n in names if n in full}
+
+            if not subset:
+                continue
 
             gptq = {}
             for name in subset:
@@ -208,7 +238,7 @@ def gptq_fwrd(model, dataloader, dev, args):
                 if 'lm_head' in name:
                     layer_weight_bits = 16
                     continue
-                if args.int8_down_proj and 'down_proj' in name:
+                if args.int8_down_proj and ('down_proj' in name or 'fc2' in name):
                     layer_weight_bits = 8
                 gptq[name] = GPTQ(subset[name])
                 gptq[name].quantizer = quant_utils.WeightQuantizer()
@@ -224,7 +254,10 @@ def gptq_fwrd(model, dataloader, dev, args):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                if is_opt:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                else:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
             for h in handles:
                 h.remove()
 
@@ -233,15 +266,21 @@ def gptq_fwrd(model, dataloader, dev, args):
                 gptq[name].fasterquant(
                     percdamp=args.percdamp, groupsize=layer_w_groupsize, actorder=args.act_order, static_groups=False
                 )
-                quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+                if is_opt:
+                    quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+                else:
+                    quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
                 gptq[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            if is_opt:
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+            else:
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
-        del gptq 
+        del gptq
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
@@ -257,11 +296,19 @@ def gptq_fwrd(model, dataloader, dev, args):
 @torch.no_grad()
 def rtn_fwrd(model, dev, args):
     '''
-    From GPTQ repo 
-    TODO: Make this function general to support both OPT and LLaMA models
+    From GPTQ repo
+    Support both OPT and LLaMA models
     '''
     assert args.w_groupsize ==-1, "Groupsize not supported in RTN!"
-    layers = model.model.layers
+
+    # Detect model type
+    if 'opt' in args.model:
+        layers = model.model.decoder.layers
+        is_opt = True
+    else:  # LLaMA
+        layers = model.model.layers
+        is_opt = False
+
     torch.cuda.empty_cache()
 
     quantizers = {}
@@ -277,7 +324,7 @@ def rtn_fwrd(model, dev, args):
             if 'lm_head' in name:
                 layer_weight_bits = 16
                 continue
-            if args.int8_down_proj and 'down_proj' in name:
+            if args.int8_down_proj and ('down_proj' in name or 'fc2' in name):
                 layer_weight_bits = 8
 
             quantizer = quant_utils.WeightQuantizer()
@@ -288,10 +335,13 @@ def rtn_fwrd(model, dev, args):
             quantizer.find_params(W)
             subset[name].weight.data = quantizer.quantize(W).to(
                 next(iter(layer.parameters())).dtype)
-            quantizers['model.layers.%d.%s' % (i, name)] = quantizer.cpu()
+            if is_opt:
+                quantizers['model.decoder.layers.%d.%s' % (i, name)] = quantizer.cpu()
+            else:
+                quantizers['model.layers.%d.%s' % (i, name)] = quantizer.cpu()
         layers[i] = layer.cpu()
         torch.cuda.empty_cache()
         del layer
-            
+
     utils.cleanup_memory(verbos=True)
     return quantizers

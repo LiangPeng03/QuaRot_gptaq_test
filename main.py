@@ -79,19 +79,26 @@ def main():
             
         quant_utils.add_actquant(model) #Add Activation Wrapper to the model
         qlayers = quant_utils.find_qlayers(model)
+        
+        # Get MLP intermediate size based on model type
+        mlp_intermediate_size = model_utils.get_mlp_bottleneck_size(model)
+        
         for name in qlayers:
-            if 'down_proj' in name:
-                had_K, K = hadamard_utils.get_hadK(model.config.intermediate_size)
+            # MLP output layer (down_proj for LLaMA, fc2 for OPT)
+            if 'down_proj' in name or 'fc2' in name:
+                had_K, K = hadamard_utils.get_hadK(mlp_intermediate_size)
                 qlayers[name].online_full_had = True
                 qlayers[name].had_K = had_K
                 qlayers[name].K = K
                 qlayers[name].fp32_had = args.fp32_had
-            if 'o_proj' in name:
-                had_K, K = hadamard_utils.get_hadK(model.config.num_attention_heads)
-                qlayers[name].online_partial_had = True
+            # Attention output layer (o_proj for LLaMA, out_proj for OPT)
+            # Note: rotate_ov_proj applies apply_exact_had_to_linear with had_dim=-1 (FULL Hadamard)
+            # So we need online_full_had to match
+            if 'o_proj' in name or 'out_proj' in name:
+                had_K, K = hadamard_utils.get_hadK(model.config.hidden_size)
+                qlayers[name].online_full_had = True
                 qlayers[name].had_K = had_K
                 qlayers[name].K = K
-                qlayers[name].had_dim = model.config.hidden_size//model.config.num_attention_heads
                 qlayers[name].fp32_had = args.fp32_had
     else:
         quant_utils.add_actquant(model) #Add Activation Wrapper to the model as the rest of the code assumes it is present
@@ -109,7 +116,7 @@ def main():
             model.load_state_dict(save_dict["model"], strict=False)
             
         elif not args.w_rtn: # GPTQ Weight Quantization
-            assert "llama" in args.model, "Only llama is supported for GPTQ!"
+            assert "llama" in args.model or "opt" in args.model, "Only llama and opt are supported for GPTQ/GPTAQ!"
             
             trainloader = data_utils.get_loaders(
                 args.cal_dataset, nsamples=args.nsamples,

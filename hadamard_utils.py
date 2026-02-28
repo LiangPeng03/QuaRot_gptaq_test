@@ -135,9 +135,12 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
                 scale=1/math.sqrt(had_dim)
                 ).reshape(transposed_shape).t()
         else:
-            raise NotImplementedError("Not implemented (or tested) yet!")
+            # Apply Hadamard on input dimension with had_dim blocks
             n = W_.shape[1]
-            W_ = hadamard_transform(W_.reshape(-1, n//had_dim, had_dim), scale=1/math.sqrt(had_dim)).reshape(init_shape)
+            W_ = fast_hadamard_transform.hadamard_transform(
+                W_.reshape(-1, n//had_dim, had_dim), 
+                scale=1/math.sqrt(had_dim)
+                ).reshape(init_shape)
     module.weight.data = W_.to(device=dev, dtype=dtype)
 
 

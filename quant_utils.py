@@ -235,7 +235,14 @@ class ActQuantWrapper(torch.nn.Module):
                 x = fast_hadamard_transform.hadamard_transform(x.reshape(-1, init_shape[-1]//self.had_dim, self.had_dim).transpose(1, 2),
                                                                scale=1/math.sqrt(init_shape[-1]//self.had_dim)).transpose(1, 2)
             else:
-                x = (self.had_K.to(x.dtype) @ x.reshape(-1, init_shape[-1]//self.had_dim, self.had_dim)) / math.sqrt(init_shape[-1]//self.had_dim)
+                # For K != 1, we need to match matmul_hadU_cuda exactly:
+                # 1. Reshape to (-1, K, n//K)
+                # 2. Apply hadamard_transform with scale 1/sqrt(n)
+                # 3. Apply had_K @ input
+                n = init_shape[-1]
+                x = x.reshape(-1, self.K, n // self.K)
+                x = fast_hadamard_transform.hadamard_transform(x.contiguous(), scale=1.0/math.sqrt(n))
+                x = self.had_K.to(x.dtype) @ x
                 
             if self.fp32_had:
                 x = x.to(x_dtype)

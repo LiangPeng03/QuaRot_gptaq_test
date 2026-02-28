@@ -222,7 +222,9 @@ def rotate_ov_proj(layer, model_type, head_num, head_dim):
     else:
         raise ValueError(f'Unknown model type {model_type}')
     
+    # v_proj: apply head-dim Hadamard on output (each head independently)
     apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
+    # o_proj: apply FULL Hadamard on input (to cancel out the concatenated head transforms)
     apply_exact_had_to_linear(o_proj, had_dim=-1, output=False)
 
 
