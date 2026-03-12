@@ -62,10 +62,6 @@ def add_aq(model, args):
 
 def main():
     args = utils.parser_gen()
-    if args.wandb:
-        import wandb
-        wandb.init(project=args.wandb_project, entity=args.wandb_id)
-        wandb.config.update(args)
 
     transformers.set_seed(args.seed)
     model = model_utils.get_model(args.model, args.hf_token)
@@ -181,8 +177,6 @@ def main():
     metric_vals['acc_avg'] = round(sum(metric_vals.values()) / len(metric_vals.values()), 4)
     print(metric_vals)
 
-    if args.wandb:
-        wandb.log(metric_vals)
 
 
 if __name__ == '__main__':
