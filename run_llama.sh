@@ -5,7 +5,7 @@ export CUDA_VISIBLE_DEVICES=$gpu_id
 
 python main.py --model meta-llama/Llama-2-7b-hf\
  --w_bits 3 \
- --w_groupsize 128 \
+ --w_groupsize 256 \
  --cal_dataset c4 \
  --a_bits 16 \
  --v_bits 16 \

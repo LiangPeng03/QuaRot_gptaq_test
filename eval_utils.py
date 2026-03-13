@@ -36,6 +36,8 @@ def evaluator(model, testenc, dev, args):
     elif llama_type:
         layers = model.model.layers
         model.model.embed_tokens = model.model.embed_tokens.to(dev)
+        if hasattr(model.model, 'rotary_emb'):
+            model.model.rotary_emb = model.model.rotary_emb.to(dev)
 
     layers[0] = layers[0].to(dev)
 
