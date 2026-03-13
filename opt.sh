@@ -11,7 +11,4 @@ $HOME/.conda/envs/awq/bin/python main.py --model facebook/opt-125m \
  --v_bits 16 \
  --k_bits 16 \
  --w_asym \
- --w_clip \
  --asym_calibrate \
- --enable_aq_calibration \
- --bsz 1 \

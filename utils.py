@@ -162,10 +162,10 @@ def parser_gen():
     parser.add_argument('--save_qmodel_path', type=str, default=None, 
                         help='Save the quantized model to the specified path!')
 
-    # WandB Arguments
-    parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument('--wandb_id', type=str, default=None)
-    parser.add_argument('--wandb_project', type=str, default=None)
+    # # WandB Arguments
+    # parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=False)
+    # parser.add_argument('--wandb_id', type=str, default=None)
+    # parser.add_argument('--wandb_project', type=str, default=None)
 
 
     #Experiments Arguments
@@ -212,8 +212,8 @@ def parser_gen():
         logging.warning('Warning: OPT-125M/1.3B is only for debugging purposes!!')
 
 
-    if args.wandb:
-        assert args.wandb_id is not None and args.wandb_project is not None, 'WandB ID/project is not provided!'
+    # if args.wandb:
+    #     assert args.wandb_id is not None and args.wandb_project is not None, 'WandB ID/project is not provided!'
         
     logging.info('Arguments: ')
     logging.info(pprint.pformat(vars(args)))

@@ -13,8 +13,6 @@ python main.py --model meta-llama/Llama-2-7b-hf\
  --w_asym \
  --w_clip \
  --asym_calibrate \
- --enable_aq_calibration \
- --bsz 1 \
  --rotate \
 
 # python main.py --model meta-llama/Meta-Llama-3-8B  \

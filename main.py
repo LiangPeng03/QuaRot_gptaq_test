@@ -138,7 +138,7 @@ def main():
 
     # Evaluating on dataset
     testloader = data_utils.get_loaders(
-            args.eval_dataset,
+            "wikitext2",
             seed=args.seed,
             model=args.model,
             seqlen=model.seqlen,
@@ -148,8 +148,19 @@ def main():
 
     dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
 
-    if args.wandb:
-            wandb.log({'ppl/{}'.format(args.eval_dataset.upper()): dataset_ppl})
+    testloader = data_utils.get_loaders(
+            "c4",
+            seed=args.seed,
+            model=args.model,
+            seqlen=model.seqlen,
+            hf_token=args.hf_token,
+            eval_mode=True
+        )
+
+    dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
+
+    # if args.wandb:
+    #         wandb.log({'ppl/{}'.format(args.eval_dataset.upper()): dataset_ppl})
 
     if not args.lm_eval:
         return
