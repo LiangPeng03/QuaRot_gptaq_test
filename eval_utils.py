@@ -50,6 +50,9 @@ def evaluator(model, testenc, dev, args):
 
     dtype = next(iter(model.parameters())).dtype
     # The input of the first decoder layer.
+    inps = torch.zeros(
+        (nbatches, batch_size, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
     inps = [0] * nbatches
     cache = {'i': 0, 'attention_mask': None}
     class Catcher(torch.nn.Module):
