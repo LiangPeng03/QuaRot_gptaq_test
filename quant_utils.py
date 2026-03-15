@@ -269,7 +269,7 @@ class WeightQuantizer(torch.nn.Module):
     def configure(
         self,
         bits, perchannel=False, sym=True,
-        mse=False, norm=2.4, grid=100, maxshrink=.8,
+        mse=False, norm=3.4, grid=100, maxshrink=.8,
     ):
         self.bits = bits
         self.perchannel = perchannel
