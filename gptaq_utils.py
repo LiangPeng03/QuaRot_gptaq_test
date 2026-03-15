@@ -22,6 +22,7 @@ class GPTAQ:
         self.columns = W.shape[1]
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
         self.dXXT = torch.zeros((self.columns, self.columns), device=self.dev)
+        self.act_magnitude = torch.zeros((self.columns,), device=self.dev)  # 每个输入通道的平均激活幅度
         self.nsamples = 0
         self.fp_inp = []
 
@@ -32,6 +33,13 @@ class GPTAQ:
         tmp = inp.shape[0]
         if len(inp.shape) == 3:
             inp = inp.reshape((-1, inp.shape[-1]))
+
+        # 计算每个输入通道的平均激活幅度（绝对值平均）
+        # inp形状: [序列长度*batch, 输入通道数]
+        act_abs_mean = inp.abs().mean(dim=0)  # [输入通道数]
+        
+        # 更新平均激活幅度的累积平均
+        self.act_magnitude = (self.act_magnitude * self.nsamples + act_abs_mean * tmp) / (self.nsamples + tmp)
 
         inp = inp.t()
 
@@ -51,8 +59,11 @@ class GPTAQ:
         W = self.layer.weight.data.clone()
         W = W.float()
 
+        # 准备激活值幅度权重（用于MSE加权）
+        act_weights = self.act_magnitude.clone()
+
         if not self.quantizer.ready():
-            self.quantizer.find_params(W)
+            self.quantizer.find_params(W, act_weights=act_weights)
 
         H = self.H
         del self.H
@@ -60,13 +71,14 @@ class GPTAQ:
         H[dead, dead] = 1
         W[:, dead] = 0
         self.dXXT[:, dead] = 0
+        act_weights[dead] = 0  # dead通道的激活值幅度也置零
 
         if static_groups:
             import copy
             groups = []
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i:(i + groupsize)])
+                quantizer.find_params(W[:, i:(i + groupsize)], act_weights=act_weights[i:(i + groupsize)])
                 groups.append(quantizer)
 
         if actorder:
@@ -74,6 +86,7 @@ class GPTAQ:
             W = W[:, perm]
             H = H[perm][:, perm]
             self.dXXT = self.dXXT[perm][:, perm]
+            act_weights = act_weights[perm]  # 激活值幅度也按相同顺序重排
             invperm = torch.argsort(perm)
 
         Losses = torch.zeros_like(W)
@@ -108,7 +121,10 @@ class GPTAQ:
                 if groupsize != -1:
                     if not static_groups:
                         if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(W[:, (i1 + i):(i1 + i + groupsize)])
+                            self.quantizer.find_params(
+                                W[:, (i1 + i):(i1 + i + groupsize)], 
+                                act_weights=act_weights[(i1 + i):(i1 + i + groupsize)]
+                            )
                     else:
                         idx = i1 + i
                         if actorder:
@@ -145,6 +161,7 @@ class GPTAQ:
         self.Losses = None
         self.Trace = None
         self.dXXT = None
+        self.act_magnitude = None
         torch.cuda.empty_cache()
         utils.cleanup_memory(verbos=False)
 

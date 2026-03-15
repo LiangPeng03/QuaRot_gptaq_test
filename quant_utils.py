@@ -269,7 +269,7 @@ class WeightQuantizer(torch.nn.Module):
     def configure(
         self,
         bits, perchannel=False, sym=True,
-        mse=False, norm=3.4, grid=100, maxshrink=.8,
+        mse=False, norm=2.4, grid=100, maxshrink=.8,
     ):
         self.bits = bits
         self.perchannel = perchannel
@@ -283,7 +283,7 @@ class WeightQuantizer(torch.nn.Module):
         else:
             self.maxq = torch.tensor(2**bits - 1)
 
-    def find_params(self, x):
+    def find_params(self, x, act_weights=None):
         if self.bits == 16:
             return
         dev = x.device
@@ -329,6 +329,29 @@ class WeightQuantizer(torch.nn.Module):
 
                 q -= x
                 q.abs_()
+                # 使用激活值幅度加权量化误差
+                # q的形状: [out_channels, in_channels]
+                # act_weights的形状: [in_channels]
+                if act_weights is not None:
+                    # 归一化激活值权重，使用幂函数压缩差异避免某些通道权重过小
+                    act_weights_norm = act_weights.to(dev)
+                    mean_val = act_weights_norm.mean().clamp(min=1e-5)
+                    # 方法1: 简单归一化（可能压缩过度）
+                    # act_weights_norm = act_weights_norm / mean_val
+                    
+                    # 方法2: 使用幂函数压缩差异，alpha=0.5 相当于开方
+                    # 这样高幅度通道仍被放大，但低幅度通道不会被过度缩小
+                    alpha = 0.5  # 可调参数，alpha越小，差异越平滑
+                    act_weights_norm = (act_weights_norm / mean_val) ** alpha
+                    
+                    # 调试输出（只在第一次迭代打印）
+                    if i == 0:
+                        print(f"[DEBUG MSE] act_weights_norm stats (first iter, alpha={alpha}):")
+                        print(f"  min: {act_weights_norm.min().item():.6f}")
+                        print(f"  max: {act_weights_norm.max().item():.6f}")
+                        print(f"  mean: {act_weights_norm.mean().item():.6f}")
+                        print(f"  first 10: {act_weights_norm[:10].tolist()}")
+                    q = q * act_weights_norm.unsqueeze(0)  # 广播到每行
                 q.pow_(self.norm)
                 err = torch.sum(q, 1)
                 tmp = err < best
