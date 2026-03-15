@@ -344,13 +344,6 @@ class WeightQuantizer(torch.nn.Module):
                     alpha = 0.5  # 可调参数，alpha越小，差异越平滑
                     act_weights_norm = (act_weights_norm / mean_val) ** alpha
                     
-                    # 调试输出（只在第一次迭代打印）
-                    if i == 0:
-                        print(f"[DEBUG MSE] act_weights_norm stats (first iter, alpha={alpha}):")
-                        print(f"  min: {act_weights_norm.min().item():.6f}")
-                        print(f"  max: {act_weights_norm.max().item():.6f}")
-                        print(f"  mean: {act_weights_norm.mean().item():.6f}")
-                        print(f"  first 10: {act_weights_norm[:10].tolist()}")
                     q = q * act_weights_norm.unsqueeze(0)  # 广播到每行
                 q.pow_(self.norm)
                 err = torch.sum(q, 1)
