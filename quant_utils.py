@@ -295,27 +295,76 @@ class WeightQuantizer(torch.nn.Module):
         else:
             x = x.flatten().unsqueeze(0)
 
-        tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
+        xmin_raw = x.min(1)[0]
+        xmax_raw = x.max(1)[0]
 
         if self.sym:
+            # 对称量化：需要包含0，所以强制 xmin <= 0, xmax >= 0
+            tmp = torch.zeros(x.shape[0], device=dev)
+            xmin = torch.minimum(xmin_raw, tmp)
+            xmax = torch.maximum(xmax_raw, tmp)
             xmax = torch.maximum(torch.abs(xmin), xmax).clamp(min=1e-5)
             self.scale = xmax / self.maxq
             self.zero = torch.zeros_like(self.scale)
+            # 记录是否同号（用于 MSE 中的 clipping 方向判断）
+            self.same_sign = None  # 对称量化不需要这个
         else:
-            tmp = (xmin == 0) & (xmax == 0)
-            xmin[tmp] = -1
-            xmax[tmp] = +1
+            # 非对称量化：检测是否同号
+            # same_sign_pos: 全正 (xmin_raw > 0)
+            # same_sign_neg: 全负 (xmax_raw < 0)
+            same_sign_pos = xmin_raw > 0  # 全正，不包含0
+            same_sign_neg = xmax_raw < 0  # 全负，不包含0
+            same_sign = same_sign_pos | same_sign_neg
+            
+            # 如果跨零，则包含0；否则使用真实范围
+            tmp = torch.zeros(x.shape[0], device=dev)
+            xmin = torch.where(same_sign, xmin_raw, torch.minimum(xmin_raw, tmp))
+            xmax = torch.where(same_sign, xmax_raw, torch.maximum(xmax_raw, tmp))
+            
+            # 处理全零的情况
+            tmp_zero = (xmin == 0) & (xmax == 0)
+            xmin[tmp_zero] = -1
+            xmax[tmp_zero] = +1
+            
             self.scale = (xmax - xmin).clamp(min=1e-5) / self.maxq
             self.zero = torch.round(-xmin / self.scale)
+            
+            # 保存同号信息，用于 MSE clipping
+            self.same_sign = same_sign
+            self.same_sign_pos = same_sign_pos
+            self.same_sign_neg = same_sign_neg
+            self.xmin_raw = xmin_raw
+            self.xmax_raw = xmax_raw
 
         if self.mse:
             best = torch.full([x.shape[0]], float('inf'), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
-                xmin1 = p * xmin
-                xmax1 = p * xmax
+                
+                if self.sym:
+                    # 对称量化：向 0 收缩
+                    xmin1 = p * xmin
+                    xmax1 = p * xmax
+                elif self.same_sign is not None:
+                    # 非对称量化：区分同号和跨零情况
+                    # 跨零情况：向 0 收缩（原有方式）
+                    xmin1_zero = p * xmin
+                    xmax1_zero = p * xmax
+                    
+                    # 同号情况：向分布中心收缩
+                    # 这样 xmin 和 xmax 会同时向中心靠拢，而不是都向 0 靠拢
+                    center = (xmin + xmax) / 2
+                    half_range = (xmax - xmin) / 2
+                    xmin1_center = center - p * half_range
+                    xmax1_center = center + p * half_range
+                    
+                    # 根据是否同号选择 clipping 方式
+                    xmin1 = torch.where(self.same_sign, xmin1_center, xmin1_zero)
+                    xmax1 = torch.where(self.same_sign, xmax1_center, xmax1_zero)
+                else:
+                    # 非对称量化，跨零情况（same_sign 为 None 时走这里）
+                    xmin1 = p * xmin
+                    xmax1 = p * xmax
 
                 if self.sym:
                     scale1 = xmax1 / self.maxq
