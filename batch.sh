@@ -1,6 +1,6 @@
 #!/bin/bash
 
-gpu_id=1
+gpu_id=0
 export CUDA_VISIBLE_DEVICES=$gpu_id
 
 # 定义要测试的模型列表
@@ -26,9 +26,9 @@ for model in "${models[@]}"; do
          --w_asym \
          --w_clip \
          --asym_calibrate \
-         --rotate \
          --bsz 1
          
         echo "Finished: Model=$model, Bits=$w_bit"
     done
 done
+#  --rotate \
