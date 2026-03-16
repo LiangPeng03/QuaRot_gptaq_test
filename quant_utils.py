@@ -357,8 +357,8 @@ class WeightQuantizer(torch.nn.Module):
                 # 负偏(左尾长): p_max 增大, p_min 减小 -> xmin 收缩更多
                 p_max = p * (1 - skewness_norm * delta)
                 p_min = p * (1 + skewness_norm * delta)
-                p_max = p_max.clamp(min=0.1, max=1.0)
-                p_min = p_min.clamp(min=0.1, max=1.0)
+                p_max = p_max.clamp(min=0, max=1.0)
+                p_min = p_min.clamp(min=0, max=1.0)
                 
                 if self.sym:
                     # 对称量化：应用偏度自适应分离
