@@ -1,9 +1,9 @@
 #!/bin/bash
 
-gpu_id=0,1
+gpu_id=1
 export CUDA_VISIBLE_DEVICES=$gpu_id
 
-python main.py --model meta-llama/Llama-2-7b-hf\
+python main.py --model meta-llama/Meta-Llama-3-8B\
  --w_bits 3 \
  --w_groupsize 256 \
  --cal_dataset c4 \
@@ -13,9 +13,9 @@ python main.py --model meta-llama/Llama-2-7b-hf\
  --w_asym \
  --w_clip \
  --asym_calibrate \
- --rotate \
+ --bsz 1
 
-# python main.py --model meta-llama/Meta-Llama-3-8B  \
+# python main.py --model meta-llama/Meta-Llama-3-8B  \ # meta-llama/Llama-2-7b-hf\
 #  --w_bits 4 \
 #  --w_groupsize -1 \
 #  --w_clip \

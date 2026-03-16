@@ -1,6 +1,6 @@
 #!/bin/bash
 
-gpu_id=0,1
+gpu_id=1
 export CUDA_VISIBLE_DEVICES=$gpu_id
 
 $HOME/.conda/envs/awq/bin/python main.py --model facebook/opt-125m \

@@ -338,33 +338,51 @@ class WeightQuantizer(torch.nn.Module):
 
         if self.mse:
             best = torch.full([x.shape[0]], float('inf'), device=dev)
+            
+            # ===== 基于偏度的自适应 p 值分离 =====
+            # 计算权重分布的偏度: skewness = E[(X - μ)³] / σ³
+            x_mean = x.mean(dim=1, keepdim=True)
+            x_std = x.std(dim=1, keepdim=True).clamp(min=1e-5)
+            skewness = ((x - x_mean) ** 3).mean(dim=1) / (x_std.squeeze() ** 3)
+            # 使用 tanh 归一化偏度到 [-1, 1]，控制敏感度
+            skewness_norm = torch.tanh(skewness * 0.5)
+            # 分离程度系数
+            delta = 0.05
+            
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
                 
+                # 基于偏度计算分离的 p_max 和 p_min
+                # 正偏(右尾长): p_max 减小, p_min 增大 -> xmax 收缩更多
+                # 负偏(左尾长): p_max 增大, p_min 减小 -> xmin 收缩更多
+                p_max = p * (1 - skewness_norm * delta)
+                p_min = p * (1 + skewness_norm * delta)
+                p_max = p_max.clamp(min=0.1, max=1.0)
+                p_min = p_min.clamp(min=0.1, max=1.0)
+                
                 if self.sym:
-                    # 对称量化：向 0 收缩
-                    xmin1 = p * xmin
-                    xmax1 = p * xmax
+                    # 对称量化：应用偏度自适应分离
+                    xmin1 = p_min * xmin
+                    xmax1 = p_max * xmax
                 elif self.same_sign is not None:
                     # 非对称量化：区分同号和跨零情况
-                    # 跨零情况：向 0 收缩（原有方式）
-                    xmin1_zero = p * xmin
-                    xmax1_zero = p * xmax
+                    # 跨零情况：基于偏度自适应分离
+                    xmin1_zero = p_min * xmin
+                    xmax1_zero = p_max * xmax
                     
-                    # 同号情况：向分布中心收缩
-                    # 这样 xmin 和 xmax 会同时向中心靠拢，而不是都向 0 靠拢
+                    # 同号情况：向分布中心收缩，同样基于偏度调整
                     center = (xmin + xmax) / 2
                     half_range = (xmax - xmin) / 2
-                    xmin1_center = center - p * half_range
-                    xmax1_center = center + p * half_range
+                    xmin1_center = center - p_min * half_range
+                    xmax1_center = center + p_max * half_range
                     
                     # 根据是否同号选择 clipping 方式
                     xmin1 = torch.where(self.same_sign, xmin1_center, xmin1_zero)
                     xmax1 = torch.where(self.same_sign, xmax1_center, xmax1_zero)
                 else:
-                    # 非对称量化，跨零情况（same_sign 为 None 时走这里）
-                    xmin1 = p * xmin
-                    xmax1 = p * xmax
+                    # 非对称量化，跨零情况
+                    xmin1 = p_min * xmin
+                    xmax1 = p_max * xmax
 
                 if self.sym:
                     scale1 = xmax1 / self.maxq
