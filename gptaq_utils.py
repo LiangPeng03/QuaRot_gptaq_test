@@ -24,9 +24,8 @@ class GPTAQ:
         self.dXXT = torch.zeros((self.columns, self.columns), device=self.dev)
         self.act_magnitude = torch.zeros((self.columns,), device=self.dev)  # 每个输入通道的平均激活幅度
         self.nsamples = 0
-        self.fp_inp = []
 
-    def add_batch(self, inp, out):
+    def add_batch(self, inp, out, fp_inp=None):
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
@@ -34,9 +33,19 @@ class GPTAQ:
         if len(inp.shape) == 3:
             inp = inp.reshape((-1, inp.shape[-1]))
 
-        # 计算每个输入通道的平均激活幅度（绝对值平均）
-        # inp形状: [序列长度*batch, 输入通道数]
-        act_abs_mean = inp.abs().mean(dim=0)  # [输入通道数]
+        # 使用原模型的FP输入计算通道重要性（而非量化后的激活值）
+        # fp_inp 形状: [hidden_size, seq_len] (已经被转置过，来自 FPInputsCache)
+        if fp_inp is not None:
+            # fp_inp 已经是转置后的形状 [hidden_size, seq_len]
+            # 需要转回 [seq_len, hidden_size] 来计算 act_abs_mean
+            if fp_inp.shape[0] == self.columns:
+                # fp_inp: [hidden_size, seq_len] -> 转置后: [seq_len, hidden_size]
+                act_abs_mean = fp_inp.t().abs().mean(dim=0)
+            else:
+                # 维度不匹配时，使用量化后的输入（回退方案）
+                act_abs_mean = inp.abs().mean(dim=0)
+        else:
+            act_abs_mean = inp.abs().mean(dim=0)
         
         # 更新平均激活幅度的累积平均
         self.act_magnitude = (self.act_magnitude * self.nsamples + act_abs_mean * tmp) / (self.nsamples + tmp)
@@ -48,10 +57,12 @@ class GPTAQ:
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         self.H += inp.matmul(inp.t())
-        dX = self.fp_inp[0].float() * math.sqrt(2 / self.nsamples) - inp
-        self.dXXT += dX.matmul(inp.t())
-
-        del self.fp_inp[0]
+        # 计算 dXXT 需要使用原模型的 FP 输入
+        # fp_inp 形状: [hidden_size, seq_len] (已转置), inp 形状: [hidden_size, seq_len] (已转置)
+        if fp_inp is not None and fp_inp.shape[0] == self.columns:
+            fp_inp_scaled = fp_inp.float() * math.sqrt(2 / self.nsamples)
+            dX = fp_inp_scaled - inp
+            self.dXXT += dX.matmul(inp.t())
 
     def fasterquant(
             self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, alpha=0.25
@@ -296,11 +307,12 @@ def gptaq_fwrd(model, dataloader, dev, args):
                 gptq[name].quantizer.configure(
                     layer_weight_bits, perchannel=True, sym=layer_weight_sym, mse=args.w_clip
                 )
-                gptq[name].fp_inp = fp_inputs_cache.fp_cache[name]
 
             def add_batch(name):
                 def tmp(_, inp, out):
-                    gptq[name].add_batch(inp[0].data, out.data)
+                    fp_cache = fp_inputs_cache.fp_cache.get(name, None)
+                    fp_inp = fp_cache.pop(0) if fp_cache else None
+                    gptq[name].add_batch(inp[0].data, out.data, fp_inp=fp_inp)
 
                 return tmp
 
