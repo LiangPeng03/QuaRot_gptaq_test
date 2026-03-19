@@ -347,7 +347,7 @@ class WeightQuantizer(torch.nn.Module):
             # 使用 tanh 归一化偏度到 [-1, 1]，控制敏感度
             skewness_norm = torch.tanh(skewness * 0.5)
             # 分离程度系数
-            delta = 0.05
+            delta = 0
             
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid

@@ -65,7 +65,7 @@ class GPTAQ:
             self.dXXT += dX.matmul(inp.t())
 
     def fasterquant(
-            self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, alpha=0.25
+            self, blocksize=256, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, alpha=0.25
     ):
         W = self.layer.weight.data.clone()
         W = W.float()
