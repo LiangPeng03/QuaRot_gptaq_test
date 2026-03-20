@@ -42,13 +42,24 @@ def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
 
          
             
-def fuse_layer_norms(model):
+def fuse_modules(model):
+    """
+    Fuse the linear and layernorm into each other inplace.
+    After this function is called, the model should output the same results as before.
+    This function only fuses the weights but does NOT replace LayerNorm with RMSNorm.
     
+    Args:
+        model: The model to be fused
+    """
     model_type = model_utils.get_model_type(model)
-    
     kwargs = {'model': model, 'model_type': model_type}
     
-    # Embedding fusion
+    # IMPORTANT: Clone lm_head weights because they are shared with embeddings
+    # If we don't do this, modifying embeddings will also affect lm_head
+    lm_head = model_utils.get_lm_head(**kwargs)
+    lm_head.weight = torch.nn.Parameter(lm_head.weight.clone())
+    
+    # Embedding fusion: subtract mean from embeddings
     for W in model_utils.get_embeddings(**kwargs):
         W_ = W.weight.data.double()
         W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
@@ -57,7 +68,6 @@ def fuse_layer_norms(model):
     
     # Fuse the linear operations in Layernorm into the adjacent linear blocks.
     for layer in layers:
-        
         # fuse the input layernorms into the linear layers
         if model_type == model_utils.LLAMA_MODEL:
             fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])    
@@ -68,21 +78,49 @@ def fuse_layer_norms(model):
         else:
             raise ValueError(f'Unknown model type {model_type}')
             
-            
-    
+        # Bake mean into output linear layers (only for OPT)
         if model_type == model_utils.OPT_MODEL:
             bake_mean_into_linear(layer.self_attn.out_proj)
             bake_mean_into_linear(layer.fc2)
                     
-    
+    # Fuse pre-head layernorm into lm_head
     fuse_ln_linear(model_utils.get_pre_head_layernorm(**kwargs), [model_utils.get_lm_head(**kwargs)])
+
+
+def replace_layernorm_with_rmsnorm(model):
+    """
+    Replace LayerNorm modules with RMSNorm modules.
+    This should be called after fuse_modules() to complete the layernorm fusion process.
+    Note: For LLaMA models, this replaces LlamaRMSNorm with our RMSN implementation.
+    """
+    model_type = model_utils.get_model_type(model)
+    
+    # For LLaMA, replace LlamaRMSNorm; for OPT, replace LayerNorm
+    if model_type == model_utils.LLAMA_MODEL:
+        type_to_replace = transformers.models.llama.modeling_llama.LlamaRMSNorm
+    elif model_type == model_utils.OPT_MODEL:
+        type_to_replace = torch.nn.LayerNorm
+    else:
+        raise ValueError(f'Unknown model type {model_type}')
     
     model_utils.replace_modules(
         model,
-        transformers.models.llama.modeling_llama.LlamaRMSNorm if model_type == model_utils.LLAMA_MODEL else torch.nn.LayerNorm,
+        type_to_replace,
         lambda _: model_utils.RMSN(model.config.hidden_size),
         replace_layers=False,
     )
+
+
+def fuse_layer_norms(model):
+    """
+    Complete layernorm fusion: fuse modules AND replace LayerNorm with RMSNorm.
+    This is a convenience function that calls both fuse_modules() and replace_layernorm_with_rmsnorm().
+    
+    Args:
+        model: The model to be fused
+    """
+    fuse_modules(model)
+    replace_layernorm_with_rmsnorm(model)
     
 
 def random_orthogonal_matrix(size, device):
