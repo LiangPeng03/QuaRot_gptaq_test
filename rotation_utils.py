@@ -42,6 +42,17 @@ def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
 
          
             
+def reset_layernorm(layernorm: torch.nn.Module) -> None:
+    """
+    Reset LayerNorm parameters to identity (weight=1, bias=0).
+    This should be called after fusing the layernorm into adjacent linear layers.
+    """
+    if hasattr(layernorm, 'weight'):
+        layernorm.weight.data.fill_(1.0)
+    if hasattr(layernorm, 'bias') and layernorm.bias is not None:
+        layernorm.bias.data.zero_()
+
+
 def fuse_modules(model):
     """
     Fuse the linear and layernorm into each other inplace.
@@ -72,9 +83,15 @@ def fuse_modules(model):
         if model_type == model_utils.LLAMA_MODEL:
             fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])    
             fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj])
+            # Reset layernorms to identity after fusing
+            reset_layernorm(layer.post_attention_layernorm)
+            reset_layernorm(layer.input_layernorm)
         elif model_type == model_utils.OPT_MODEL:
             fuse_ln_linear(layer.self_attn_layer_norm, [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj])
             fuse_ln_linear(layer.final_layer_norm, [layer.fc1])
+            # Reset layernorms to identity after fusing
+            reset_layernorm(layer.self_attn_layer_norm)
+            reset_layernorm(layer.final_layer_norm)
         else:
             raise ValueError(f'Unknown model type {model_type}')
             
@@ -84,7 +101,9 @@ def fuse_modules(model):
             bake_mean_into_linear(layer.fc2)
                     
     # Fuse pre-head layernorm into lm_head
-    fuse_ln_linear(model_utils.get_pre_head_layernorm(**kwargs), [model_utils.get_lm_head(**kwargs)])
+    pre_head_ln = model_utils.get_pre_head_layernorm(**kwargs)
+    fuse_ln_linear(pre_head_ln, [model_utils.get_lm_head(**kwargs)])
+    reset_layernorm(pre_head_ln)
 
 
 def replace_layernorm_with_rmsnorm(model):
@@ -208,7 +227,9 @@ def rotate_mlp_output(layer, Q, model_type):
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device=utils.DEV, dtype=torch.float64)
     W.weight.data = torch.matmul(Q.T, W_).to(device="cpu", dtype=dtype)
-    apply_exact_had_to_linear(W, had_dim=-1, output=False) #apply exact (inverse) hadamard on the weights of mlp output
+    # Only apply Hadamard for Llama models; use pure rotation for OPT
+    if model_type == model_utils.LLAMA_MODEL:
+        apply_exact_had_to_linear(W, had_dim=-1, output=False) #apply exact (inverse) hadamard on the weights of mlp output
     if W.bias is not None:
         b = W.bias.data.to(device=utils.DEV, dtype=torch.float64)
         W.bias.data = torch.matmul(Q.T, b).to(device="cpu", dtype=dtype)
@@ -252,18 +273,19 @@ def rotate_head(model, Q: torch.Tensor) -> None:
     W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
 def rotate_ov_proj(layer, model_type, head_num, head_dim):
-    v_proj = layer.self_attn.v_proj
+    # Only apply Hadamard for Llama models; skip for OPT (use pure rotation only)
     if model_type == model_utils.LLAMA_MODEL:
+        v_proj = layer.self_attn.v_proj
         o_proj = layer.self_attn.o_proj
+        # v_proj: apply head-dim Hadamard on output (each head independently)
+        apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
+        # o_proj: apply FULL Hadamard on input (to cancel out the concatenated head transforms)
+        apply_exact_had_to_linear(o_proj, had_dim=-1, output=False)
     elif model_type == model_utils.OPT_MODEL:
-        o_proj = layer.self_attn.out_proj
+        # For OPT, skip Hadamard entirely - rotation already applied in rotate_attention_inputs/rotate_attention_output
+        pass
     else:
         raise ValueError(f'Unknown model type {model_type}')
-    
-    # v_proj: apply head-dim Hadamard on output (each head independently)
-    apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
-    # o_proj: apply FULL Hadamard on input (to cancel out the concatenated head transforms)
-    apply_exact_had_to_linear(o_proj, had_dim=-1, output=False)
 
 
 @torch.inference_mode()

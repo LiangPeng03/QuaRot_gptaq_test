@@ -1,7 +1,6 @@
 """
 PPL对比实验：验证LayerNorm融合并替换为RMSNorm的效果
-参考: TransformerCompression/experiments/eval_opt125m_layernorm.py
-运行: python compare_fusion_ppl.py --model facebook/opt-125m
+运行: python compare_fusion_ppl.py --model facebook/opt-125m --rotate
 """
 import torch
 import transformers
@@ -10,13 +9,14 @@ import data_utils
 import rotation_utils
 import eval_utils
 import utils
-import copy
+import quant_utils
+import hadamard_utils
 
 
-def evaluate_ppl(model, args, dataset="wikitext2"):
-    """评估指定数据集上的PPL"""
+def evaluate_ppl(model, args):
+    """评估wikitext2数据集上的PPL"""
     testloader = data_utils.get_loaders(
-        dataset,
+        "wikitext2",
         seed=0,
         model=args.model,
         seqlen=model.seqlen,
@@ -27,195 +27,143 @@ def evaluate_ppl(model, args, dataset="wikitext2"):
     return ppl
 
 
+def configure_hadamard(model, qlayers, args):
+    """配置Hadamard参数（支持Llama和OPT模型）"""
+    # 检测模型类型
+    model_name_lower = args.model.lower()
+    is_llama = "llama" in model_name_lower
+    is_opt = "opt" in model_name_lower
+
+    # 获取配置参数
+    if is_llama:
+        intermediate_size = model.config.intermediate_size
+        mlp_output_name = 'down_proj'
+        attn_output_name = 'o_proj'
+    elif is_opt:
+        intermediate_size = model.config.ffn_dim
+        mlp_output_name = 'fc2'
+        attn_output_name = 'out_proj'
+    else:
+        raise ValueError(f"Unsupported model: {args.model}")
+
+    num_attention_heads = model.config.num_attention_heads
+    head_dim = model.config.hidden_size // model.config.num_attention_heads
+
+    for name in qlayers:
+        # 配置MLP输出层（完全Hadamard）
+        if mlp_output_name in name:
+            if is_llama:
+                # Llama: 使用在线Hadamard
+                had_K, K = hadamard_utils.get_hadK(intermediate_size)
+                qlayers[name].online_full_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].fp32_had = args.fp32_had
+            else:
+                # OPT: 禁用在线Hadamard，避免数值问题（ffn_dim通常不是标准2的幂）
+                print(f"  [INFO] 禁用 {name} 的在线Hadamard（OPT模型ffn_dim={intermediate_size}）")
+
+        # 配置Attention输出层（部分Hadamard）- 仅Llama支持
+        if attn_output_name in name:
+            if is_llama:
+                # Llama: num_heads通常是2的幂，支持部分Hadamard
+                had_K, K = hadamard_utils.get_hadK(num_attention_heads)
+                qlayers[name].online_partial_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].had_dim = head_dim
+                qlayers[name].fp32_had = args.fp32_had
+            else:
+                # OPT: num_heads通常不是2的幂，禁用Hadamard避免PPL暴涨
+                print(f"  [INFO] 禁用 {name} 的Hadamard变换（OPT模型num_heads={num_attention_heads}不是2的幂）")
+
+
 def main():
-    # 使用与main.py相同的参数解析
     args = utils.parser_gen()
     transformers.set_seed(args.seed)
     
-    print("=" * 60)
-    print("LayerNorm融合PPL对比实验 (分步评估)")
-    print("=" * 60)
-    print(f"模型: {args.model}")
-    print(f"评估数据集: wikitext2, c4")
-    print()
+    print(f"\n模型: {args.model}")
+    print(f"Rotate: {args.rotate} (mode: {args.rotate_mode})" if args.rotate else f"Rotate: {args.rotate}")
     
-    # =========================================================================
-    # Step 1: 加载原始模型并评估PPL
-    # =========================================================================
-    print("=" * 60)
-    print("[Step 1] 加载原始模型并评估PPL...")
-    print("=" * 60)
+    results = {}
     
+    # Step 1: fuse_modules
+    print("\n[1/4] fuse_modules...")
     model = model_utils.get_model(args.model, args.hf_token)
     model.eval()
-    model.to(utils.DEV)
-    
-    original_ppl_wiki = evaluate_ppl(model, args, "wikitext2")
-    original_ppl_c4 = evaluate_ppl(model, args, "c4")
-    
-    print(f"  Original WikiText2 PPL: {original_ppl_wiki:.4f}")
-    print(f"  Original C4 PPL: {original_ppl_c4:.4f}")
-    print()
-    
-    # 将模型移回CPU释放内存
-    model.cpu()
-    utils.cleanup_memory()
-    
-    # =========================================================================
-    # Step 2: 应用 fuse_modules (只融合权重，不替换RMSNorm)
-    # =========================================================================
-    print("=" * 60)
-    print("[Step 2] 应用 fuse_modules (融合LayerNorm权重)...")
-    print("=" * 60)
-    
-    # 重新加载模型以确保干净状态
-    model = model_utils.get_model(args.model, args.hf_token)
-    model.eval()
-    
-    # 执行融合（只融合，不替换RMSNorm）
     rotation_utils.fuse_modules(model)
-    print("  融合完成！")
-    print()
-    
-    # =========================================================================
-    # Step 3: 评估 fuse_modules 后的PPL
-    # =========================================================================
-    print("=" * 60)
-    print("[Step 3] 评估 fuse_modules 后的PPL...")
-    print("=" * 60)
     
     model.to(utils.DEV)
-    after_fuse_ppl_wiki = evaluate_ppl(model, args, "wikitext2")
-    after_fuse_ppl_c4 = evaluate_ppl(model, args, "c4")
+    results['fuse_wiki'] = evaluate_ppl(model, args)
+    print(f"  PPL: wiki={results['fuse_wiki']:.4f}")
     
-    print(f"  After fuse_modules WikiText2 PPL: {after_fuse_ppl_wiki:.4f}")
-    print(f"  After fuse_modules C4 PPL: {after_fuse_ppl_c4:.4f}")
-    print()
-    
-    # 将模型移回CPU释放内存
     model.cpu()
     utils.cleanup_memory()
     
-    # =========================================================================
-    # Step 4: 应用 replace_layernorm_with_rmsnorm (替换为RMSNorm)
-    # =========================================================================
-    print("=" * 60)
-    print("[Step 4] 将 LayerNorm 替换为 RMSNorm...")
-    print("=" * 60)
-    
-    # 继续在已融合的模型上操作
+    # Step 2: +RMSNorm
+    print("\n[2/4] +RMSNorm...")
     rotation_utils.replace_layernorm_with_rmsnorm(model)
-    print("  RMSNorm替换完成！")
-    print()
-    
-    # =========================================================================
-    # Step 5: 评估 RMSNorm 替换后的PPL
-    # =========================================================================
-    print("=" * 60)
-    print("[Step 5] 评估 RMSNorm 替换后的PPL...")
-    print("=" * 60)
     
     model.to(utils.DEV)
-    after_rmsnorm_ppl_wiki = evaluate_ppl(model, args, "wikitext2")
-    after_rmsnorm_ppl_c4 = evaluate_ppl(model, args, "c4")
+    results['rmsnorm_wiki'] = evaluate_ppl(model, args)
+    print(f"  PPL: wiki={results['rmsnorm_wiki']:.4f}")
     
-    print(f"  After RMSNorm WikiText2 PPL: {after_rmsnorm_ppl_wiki:.4f}")
-    print(f"  After RMSNorm C4 PPL: {after_rmsnorm_ppl_c4:.4f}")
-    print()
-    
-    # 清理
     model.cpu()
     utils.cleanup_memory()
     
-    # =========================================================================
-    # 总结对比结果
-    # =========================================================================
-    print("=" * 60)
-    print("对比结果总结")
-    print("=" * 60)
+    # Step 3: fuse + rotate + ActQuant（条件执行）
+    print("\n[3/4] fuse+rotate+ActQuant...")
+    model = model_utils.get_model(args.model, args.hf_token)
+    model.eval()
     
-    # WikiText2
-    wiki_diff_fuse = abs(after_fuse_ppl_wiki - original_ppl_wiki) / original_ppl_wiki * 100
-    wiki_diff_rmsnorm = abs(after_rmsnorm_ppl_wiki - original_ppl_wiki) / original_ppl_wiki * 100
-    
-    print(f"\nWikiText2:")
-    print(f"  原始模型 PPL:           {original_ppl_wiki:.6f}")
-    print(f"  fuse_modules 后 PPL:    {after_fuse_ppl_wiki:.6f} (变化: {after_fuse_ppl_wiki - original_ppl_wiki:+.6f}, {wiki_diff_fuse:.4f}%)")
-    print(f"  RMSNorm替换后 PPL:      {after_rmsnorm_ppl_wiki:.6f} (变化: {after_rmsnorm_ppl_wiki - original_ppl_wiki:+.6f}, {wiki_diff_rmsnorm:.4f}%)")
-    
-    # C4
-    c4_diff_fuse = abs(after_fuse_ppl_c4 - original_ppl_c4) / original_ppl_c4 * 100
-    c4_diff_rmsnorm = abs(after_rmsnorm_ppl_c4 - original_ppl_c4) / original_ppl_c4 * 100
-    
-    print(f"\nC4:")
-    print(f"  原始模型 PPL:           {original_ppl_c4:.6f}")
-    print(f"  fuse_modules 后 PPL:    {after_fuse_ppl_c4:.6f} (变化: {after_fuse_ppl_c4 - original_ppl_c4:+.6f}, {c4_diff_fuse:.4f}%)")
-    print(f"  RMSNorm替换后 PPL:      {after_rmsnorm_ppl_c4:.6f} (变化: {after_rmsnorm_ppl_c4 - original_ppl_c4:+.6f}, {c4_diff_rmsnorm:.4f}%)")
-    
-    # 判断结果
-    tolerance = 1.0  # 1% 容差
-    print(f"\n" + "=" * 60)
-    print("结果判断")
-    print("=" * 60)
-    
-    if wiki_diff_fuse < tolerance:
-        print(f"✓ WikiText2 fuse_modules: PPL变化 {wiki_diff_fuse:.4f}% < {tolerance}% (通过)")
-    else:
-        print(f"✗ WikiText2 fuse_modules: PPL变化 {wiki_diff_fuse:.4f}% >= {tolerance}% (未通过)")
+    if args.rotate:
+        rotation_utils.fuse_layer_norms(model)
+        rotation_utils.rotate_model(model, args)
+        utils.cleanup_memory()
         
-    if c4_diff_fuse < tolerance:
-        print(f"✓ C4 fuse_modules: PPL变化 {c4_diff_fuse:.4f}% < {tolerance}% (通过)")
+        # 添加ActQuantWrapper并配置Hadamard参数
+        quant_utils.add_actquant(model)
+        qlayers = quant_utils.find_qlayers(model)
+        configure_hadamard(model, qlayers, args)
     else:
-        print(f"✗ C4 fuse_modules: PPL变化 {c4_diff_fuse:.4f}% >= {tolerance}% (未通过)")
+        print("  [INFO] --rotate 未启用，跳过此步骤")
+        results['rotate_wiki'] = float('nan')
     
-    print(f"\n  LayerNorm -> RMSNorm WikiText2变化: {wiki_diff_rmsnorm:.4f}%")
-    print(f"  LayerNorm -> RMSNorm C4变化: {c4_diff_rmsnorm:.4f}%")
+    model.to(utils.DEV)
+    if args.rotate:
+        results['rotate_wiki'] = evaluate_ppl(model, args)
+        print(f"  PPL: wiki={results['rotate_wiki']:.4f}")
     
-    # =========================================================================
-    # 分析说明
-    # =========================================================================
-    print("\n" + "=" * 60)
-    print("分析说明")
-    print("=" * 60)
-    print("fuse_modules 原理：")
-    print("1. 将LayerNorm的缩放参数(γ)融合到相邻线性层的权重")
-    print("2. 将去均值操作(x-μ)提前到Embedding层或融入输出层权重")
-    print("3. 此步骤数学上等价，PPL应几乎不变")
-    print()
-    print("replace_layernorm_with_rmsnorm 原理：")
-    print("1. 将LayerNorm模块替换为RMSNorm模块")
-    print("2. RMSNorm不做去均值操作，只进行缩放")
-    print("3. 由于fuse_modules已将去均值融入权重，此替换应保持等价性")
-    print()
-    print("预期效果：")
-    print("- fuse_modules 后 PPL 变化应 < 1%（浮点运算舍入误差）")
-    print("- RMSNorm 替换后 PPL 变化应 < 1%（因去均值已融入权重）")
-    print()
+    model.cpu()
+    utils.cleanup_memory()
     
-    # 保存结果
-    results = {
-        "model": args.model,
-        "original_ppl_wiki": original_ppl_wiki,
-        "after_fuse_ppl_wiki": after_fuse_ppl_wiki,
-        "after_rmsnorm_ppl_wiki": after_rmsnorm_ppl_wiki,
-        "wiki_diff_fuse_percent": wiki_diff_fuse,
-        "wiki_diff_rmsnorm_percent": wiki_diff_rmsnorm,
-        "original_ppl_c4": original_ppl_c4,
-        "after_fuse_ppl_c4": after_fuse_ppl_c4,
-        "after_rmsnorm_ppl_c4": after_rmsnorm_ppl_c4,
-        "c4_diff_fuse_percent": c4_diff_fuse,
-        "c4_diff_rmsnorm_percent": c4_diff_rmsnorm,
-        "wiki_fuse_pass": wiki_diff_fuse < tolerance,
-        "wiki_rmsnorm_pass": wiki_diff_rmsnorm < tolerance,
-        "c4_fuse_pass": c4_diff_fuse < tolerance,
-        "c4_rmsnorm_pass": c4_diff_rmsnorm < tolerance,
-    }
     
-    import json
-    output_file = f"fusion_ppl_comparison_{args.model.split('/')[-1]}.json"
-    with open(output_file, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"结果已保存到: {output_file}")
+    # 总结
+    print("\n" + "=" * 50)
+    print("结果总结 (WikiText2)")
+    print("=" * 50)
+    print(f"{'步骤':<20} {'PPL':>10} {'Δ%':>10}")
+    print("-" * 50)
+    
+    # 使用fuse作为baseline
+    baseline_ppl = results['fuse_wiki']
+    
+    steps = [
+        ('fuse', 'fuse_wiki'),
+        ('+rmsnorm', 'rmsnorm_wiki'),
+        ('fuse+rotate', 'rotate_wiki'),
+    ]
+    
+    for name, wk in steps:
+        wiki_ppl = results[wk]
+        if not isinstance(wiki_ppl, float) or wiki_ppl != wiki_ppl:  # 检查nan
+            print(f"{name:<20} {'N/A':>10} {'N/A':>10}")
+        else:
+            wiki_diff = (wiki_ppl - baseline_ppl) / baseline_ppl * 100
+            print(f"{name:<20} {wiki_ppl:>10.4f} {wiki_diff:>+9.2f}%")
+    
+    print("=" * 50)
+    
 
 
 if __name__ == "__main__":
