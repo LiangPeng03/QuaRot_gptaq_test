@@ -164,6 +164,130 @@ def main():
     
     print("=" * 50)
     
+    # 输出最终模型结构信息
+    print_model_structure(model, args)
+
+
+def print_model_structure(model, args):
+    """打印模型结构信息（简化版，重复层只显示一层，参数和模块名对应）"""
+    import re
+    
+    print("\n" + "=" * 50)
+    model_type_str = "LLaMA" if "llama" in args.model.lower() else "OPT"
+    print(f"{model_type_str} 模型结构信息")
+    print("=" * 50)
+    
+    # 1. 所有模块和对应的参数（重复的层只显示一层）
+    print("\n1. 所有模块及其参数:")
+    shown_modules = set()
+    module_params = {}  # 存储每个模块的参数
+    
+    # 先收集所有参数，按模块分组
+    for name, param in model.named_parameters():
+        # 提取模块名（参数名去掉最后一项）
+        parts = name.rsplit('.', 1)
+        if len(parts) == 2:
+            module_name, param_name = parts
+        else:
+            module_name = ""
+            param_name = name
+        
+        # 将层索引替换为{L}来表示通配
+        generic_module = re.sub(r'\.layers\.\d+', '.layers.{L}', module_name)
+        
+        if generic_module not in module_params:
+            module_params[generic_module] = {}
+        
+        # 参数名也做通配处理
+        generic_param = re.sub(r'\.layers\.\d+', '.layers.{L}', name)
+        module_params[generic_module][generic_param] = param.shape
+    
+    # 获取所有模块信息
+    module_types = {}
+    for name, module in model.named_modules():
+        if not name:
+            continue
+        generic_name = re.sub(r'\.layers\.\d+', '.layers.{L}', name)
+        if generic_name not in module_types:
+            module_types[generic_name] = module.__class__.__name__
+    
+    # 按层级顺序输出模块和参数
+    sorted_modules = sorted(module_params.keys(), key=lambda x: (len(x.split('.')), x))
+    
+    for generic_module in sorted_modules:
+        if generic_module in module_types:
+            module_type = module_types[generic_module]
+        else:
+            module_type = "Module"
+        
+        # 跳过重复的层模块，只保留通配形式
+        if '.layers.{L}' in generic_module and re.search(r'\.layers\.\d+', generic_module):
+            continue
+            
+        # 输出模块名和类型
+        display_module = generic_module if generic_module else "(root)"
+        print(f"\n{display_module}: {module_type}")
+        
+        # 输出该模块的所有参数
+        params = module_params[generic_module]
+        for param_name, shape in sorted(params.items()):
+            # 只显示参数名（去掉模块前缀）
+            short_name = param_name.rsplit('.', 1)[-1]
+            print(f"  - {short_name}: {shape}")
+    
+    # 2. 模型类型和基本信息
+    print("\n" + "=" * 60)
+    print("2. 模型类型和基本信息")
+    print("=" * 60)
+    print(f"模型类型: {type(model)}")
+    print(f"模型类名: {model.__class__.__name__}")
+    print(f"配置类名: {model.config.__class__.__name__}")
+    
+    # 3. 模型关键属性
+    print("\n" + "=" * 60)
+    print("3. 模型的关键属性")
+    print("=" * 60)
+    key_attrs = ['config', 'device', 'dtype', 'training']
+    for attr in key_attrs:
+        if hasattr(model, attr):
+            print(f"  - {attr}")
+    
+    # 4. 模型结构探索
+    print("\n" + "=" * 60)
+    print("4. 模型结构探索")
+    print("=" * 60)
+    
+    # 检测模型结构类型
+    if hasattr(model, 'model'):
+        print("model.model: 存在")
+        inner_model = model.model
+    elif hasattr(model, 'decoder'):
+        print("model.decoder: 存在")
+        inner_model = model.decoder
+    elif hasattr(model, 'transformer'):
+        print("model.transformer: 存在")
+        inner_model = model.transformer
+    else:
+        print("model.model: 不存在")
+        print("model.decoder: 不存在")
+        print("model.transformer: 不存在")
+        inner_model = None
+    
+    # Decoder层详细结构
+    if inner_model is not None and hasattr(inner_model, 'layers'):
+        layers = inner_model.layers
+        print(f"\n模型总层数: {len(layers)}")
+        print(f"隐藏层维度: {model.config.hidden_size}")
+        print(f"注意力头数: {model.config.num_attention_heads}")
+        print(f"每个头的维度: {model.config.hidden_size // model.config.num_attention_heads}")
+        
+        if len(layers) > 0:
+            first_layer = layers[0]
+            print(f"\n每层包含的子模块:")
+            for name, module in first_layer.named_children():
+                print(f"  - {name}: {module.__class__.__name__}")
+    
+    print("=" * 60)
 
 
 if __name__ == "__main__":

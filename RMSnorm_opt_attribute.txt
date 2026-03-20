@@ -1,0 +1,47 @@
+OPT 模型结构信息
+==================================================
+
+1. 所有模块及其参数:
+
+lm_head: ActQuantWrapper
+  - bias: torch.Size([50272])
+  - weight: torch.Size([50272, 768])
+
+model.decoder.embed_positions: OPTLearnedPositionalEmbedding
+  - weight: torch.Size([2050, 768])
+
+model.decoder.embed_tokens: Embedding
+  - weight: torch.Size([50272, 768])
+
+model.decoder.final_layer_norm: RMSN
+  - weight: torch.Size([1])
+
+model.decoder.layers.{L}.fc1: ActQuantWrapper
+  - bias: torch.Size([3072])
+  - weight: torch.Size([3072, 768])
+
+model.decoder.layers.{L}.fc2: ActQuantWrapper
+  - bias: torch.Size([768])
+  - weight: torch.Size([768, 3072])
+
+model.decoder.layers.{L}.final_layer_norm: RMSN
+  - weight: torch.Size([1])
+
+model.decoder.layers.{L}.self_attn_layer_norm: RMSN
+  - weight: torch.Size([1])
+
+model.decoder.layers.{L}.self_attn.k_proj: ActQuantWrapper
+  - bias: torch.Size([768])
+  - weight: torch.Size([768, 768])
+
+model.decoder.layers.{L}.self_attn.out_proj: ActQuantWrapper
+  - bias: torch.Size([768])
+  - weight: torch.Size([768, 768])
+
+model.decoder.layers.{L}.self_attn.q_proj: ActQuantWrapper
+  - bias: torch.Size([768])
+  - weight: torch.Size([768, 768])
+
+model.decoder.layers.{L}.self_attn.v_proj: ActQuantWrapper
+  - bias: torch.Size([768])
+  - weight: torch.Size([768, 768])
