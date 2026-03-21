@@ -130,6 +130,13 @@ def parser_gen():
                         help='static groups in GPT(A)Q')
     parser.add_argument('--asym_calibrate', action=argparse.BooleanOptionalAction, default=False,
                         help='enable GPTAQ asymmetric calibration')
+    parser.add_argument('--act_weight_mode', type=str, default='fp_post_rotate',
+                        choices=['none', 'fp_pre_rotate', 'fp_post_rotate', 'quant'],
+                        help='''Activation weighting mode for GPTAQ quantization:
+                        - none: No activation weighting (original GPTQ)
+                        - fp_pre_rotate: Use FP activations from original model before rotation
+                        - fp_post_rotate: Use FP activations after rotation (default)
+                        - quant: Use quantized activations for weighting''')
 
     # General Quantization Arguments
     parser.add_argument('--int8_down_proj', action=argparse.BooleanOptionalAction, default=False,

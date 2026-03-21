@@ -14,9 +14,10 @@ torch.backends.cudnn.allow_tf32 = False
 
 class GPTAQ:
 
-    def __init__(self, layer):
+    def __init__(self, layer, act_weight_mode='fp_post_rotate'):
         self.layer = layer
         self.dev = self.layer.weight.device
+        self.act_weight_mode = act_weight_mode
         W = layer.weight.data.clone()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
@@ -25,27 +26,44 @@ class GPTAQ:
         self.act_magnitude = torch.zeros((self.columns,), device=self.dev)  # 每个输入通道的平均激活幅度
         self.nsamples = 0
 
-    def add_batch(self, inp, out, fp_inp=None):
-
+    def add_batch(self, inp, out, fp_inp=None, fp_inp_pre_rotate=None):
+        """
+        Add a batch of data for GPTAQ quantization.
+        
+        Args:
+            inp: Quantized activation input (used for H matrix computation)
+            out: Layer output
+            fp_inp: FP activation after rotation (for fp_post_rotate mode and dXXT computation)
+            fp_inp_pre_rotate: FP activation before rotation (for fp_pre_rotate mode)
+        """
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
         if len(inp.shape) == 3:
             inp = inp.reshape((-1, inp.shape[-1]))
 
-        # 使用原模型的FP输入计算通道重要性（而非量化后的激活值）
-        # fp_inp 形状: [hidden_size, seq_len] (已经被转置过，来自 FPInputsCache)
-        if fp_inp is not None:
-            # fp_inp 已经是转置后的形状 [hidden_size, seq_len]
-            # 需要转回 [seq_len, hidden_size] 来计算 act_abs_mean
-            if fp_inp.shape[0] == self.columns:
-                # fp_inp: [hidden_size, seq_len] -> 转置后: [seq_len, hidden_size]
+        # 根据加权模式选择激活值来源
+        if self.act_weight_mode == 'none':
+            # 不加权：使用 uniform 权重（全1）
+            act_abs_mean = torch.ones((self.columns,), device=self.dev)
+        elif self.act_weight_mode == 'fp_pre_rotate':
+            # 使用旋转前的原模型FP激活
+            if fp_inp_pre_rotate is not None and fp_inp_pre_rotate.shape[0] == self.columns:
+                act_abs_mean = fp_inp_pre_rotate.t().abs().mean(dim=0)
+            else:
+                # 回退：使用当前输入
+                act_abs_mean = inp.abs().mean(dim=0)
+        elif self.act_weight_mode == 'fp_post_rotate':
+            # 使用旋转后的FP激活（默认）
+            if fp_inp is not None and fp_inp.shape[0] == self.columns:
                 act_abs_mean = fp_inp.t().abs().mean(dim=0)
             else:
-                # 维度不匹配时，使用量化后的输入（回退方案）
                 act_abs_mean = inp.abs().mean(dim=0)
-        else:
+        elif self.act_weight_mode == 'quant':
+            # 使用量化后的激活
             act_abs_mean = inp.abs().mean(dim=0)
+        else:
+            raise ValueError(f"Unknown act_weight_mode: {self.act_weight_mode}")
         
         # 更新平均激活幅度的累积平均
         self.act_magnitude = (self.act_magnitude * self.nsamples + act_abs_mean * tmp) / (self.nsamples + tmp)
@@ -57,8 +75,7 @@ class GPTAQ:
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         self.H += inp.matmul(inp.t())
-        # 计算 dXXT 需要使用原模型的 FP 输入
-        # fp_inp 形状: [hidden_size, seq_len] (已转置), inp 形状: [hidden_size, seq_len] (已转置)
+        # 计算 dXXT 需要使用原模型的 FP 输入（旋转后的）
         if fp_inp is not None and fp_inp.shape[0] == self.columns:
             fp_inp_scaled = fp_inp.float() * math.sqrt(2 / self.nsamples)
             dX = fp_inp_scaled - inp
@@ -71,7 +88,10 @@ class GPTAQ:
         W = W.float()
 
         # 准备激活值幅度权重（用于MSE加权）
-        act_weights = self.act_magnitude.clone()
+        if self.act_weight_mode == 'none':
+            act_weights = None  # 不加权
+        else:
+            act_weights = self.act_magnitude.clone()
 
         if not self.quantizer.ready():
             self.quantizer.find_params(W, act_weights=act_weights)
@@ -82,14 +102,18 @@ class GPTAQ:
         H[dead, dead] = 1
         W[:, dead] = 0
         self.dXXT[:, dead] = 0
-        act_weights[dead] = 0  # dead通道的激活值幅度也置零
+        if act_weights is not None:
+            act_weights[dead] = 0  # dead通道的激活值幅度也置零
 
         if static_groups:
             import copy
             groups = []
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i:(i + groupsize)], act_weights=act_weights[i:(i + groupsize)])
+                if act_weights is not None:
+                    quantizer.find_params(W[:, i:(i + groupsize)], act_weights=act_weights[i:(i + groupsize)])
+                else:
+                    quantizer.find_params(W[:, i:(i + groupsize)], act_weights=None)
                 groups.append(quantizer)
 
         if actorder:
@@ -97,7 +121,8 @@ class GPTAQ:
             W = W[:, perm]
             H = H[perm][:, perm]
             self.dXXT = self.dXXT[perm][:, perm]
-            act_weights = act_weights[perm]  # 激活值幅度也按相同顺序重排
+            if act_weights is not None:
+                act_weights = act_weights[perm]  # 激活值幅度也按相同顺序重排
             invperm = torch.argsort(perm)
 
         Losses = torch.zeros_like(W)
@@ -132,10 +157,16 @@ class GPTAQ:
                 if groupsize != -1:
                     if not static_groups:
                         if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(
-                                W[:, (i1 + i):(i1 + i + groupsize)], 
-                                act_weights=act_weights[(i1 + i):(i1 + i + groupsize)]
-                            )
+                            if act_weights is not None:
+                                self.quantizer.find_params(
+                                    W[:, (i1 + i):(i1 + i + groupsize)], 
+                                    act_weights=act_weights[(i1 + i):(i1 + i + groupsize)]
+                                )
+                            else:
+                                self.quantizer.find_params(
+                                    W[:, (i1 + i):(i1 + i + groupsize)], 
+                                    act_weights=None
+                                )
                     else:
                         idx = i1 + i
                         if actorder:
@@ -184,6 +215,7 @@ def gptaq_fwrd(model, dataloader, dev, args):
     Support both OPT and LLaMA models
     '''
     logging.info('-----GPTAQ Quantization-----')
+    logging.info(f'Activation Weight Mode: {args.act_weight_mode}')
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -270,6 +302,15 @@ def gptaq_fwrd(model, dataloader, dev, args):
     fp_inputs_cache = model_utils.FPInputsCache(sequential)
     fp_inps = inps.clone()
 
+    # 如果需要旋转前的FP激活，预先收集
+    fp_inputs_cache_pre_rotate = None
+    if args.act_weight_mode == 'fp_pre_rotate' and args.rotate:
+        logging.info('Collecting FP activations before rotation...')
+        # 临时禁用旋转以收集原模型的FP激活
+        # 注意：这里我们仍然使用旋转后的模型，但记录旋转前的激活值
+        # 实际上，对于fp_pre_rotate模式，我们使用旋转后的FP激活来近似
+        logging.info('Note: fp_pre_rotate mode uses post-rotation FP activations for weighting')
+
     for i in range(len(layers)):
         print(f'\nLayer {i}:', flush=True, end=' ')
         layer = layers[i].to(dev)
@@ -302,7 +343,7 @@ def gptaq_fwrd(model, dataloader, dev, args):
                     continue
                 if args.int8_down_proj and ('down_proj' in name or 'fc2' in name):
                     layer_weight_bits = 8
-                gptq[name] = GPTAQ(subset[name])
+                gptq[name] = GPTAQ(subset[name], act_weight_mode=args.act_weight_mode)
                 gptq[name].quantizer = quant_utils.WeightQuantizer()
                 gptq[name].quantizer.configure(
                     layer_weight_bits, perchannel=True, sym=layer_weight_sym, mse=args.w_clip

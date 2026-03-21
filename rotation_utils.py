@@ -273,7 +273,7 @@ def rotate_head(model, Q: torch.Tensor) -> None:
     W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
 def rotate_ov_proj(layer, model_type, head_num, head_dim):
-    # Only apply Hadamard for Llama models; skip for OPT (use pure rotation only)
+    # Only apply Hadamard for Llama models; use pure rotation for OPT
     if model_type == model_utils.LLAMA_MODEL:
         v_proj = layer.self_attn.v_proj
         o_proj = layer.self_attn.o_proj
@@ -299,6 +299,7 @@ def rotate_model(model, args):
 
 
     model_type = model_utils.model_type_extractor(model)
+    
     rotate_embeddings(model, Q)
     rotate_head(model, Q)
     utils.cleanup_memory()
