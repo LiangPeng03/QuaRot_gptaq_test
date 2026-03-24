@@ -9,6 +9,44 @@ import gptq_utils
 import gptaq_utils
 import eval_utils
 import hadamard_utils
+import csv
+import numpy as np
+import os
+
+
+def save_layer_scales_to_csv(quantizers, layer_key, output_path):
+    """提取指定层的 scale 并保存为 CSV，供 MATLAB 三维绘图"""
+    if layer_key not in quantizers:
+        print(f"Warning: {layer_key} not found in quantizers!")
+        print(f"Available keys: {list(quantizers.keys())[:10]}...")
+        return
+    
+    quantizer = quantizers[layer_key]
+    scale = quantizer.scale.cpu().numpy()
+    
+    # 确保2D形状 [out_channels, num_groups]
+    if scale.ndim == 1:
+        scale = scale.reshape(-1, 1)
+    elif scale.ndim > 2:
+        scale = scale.squeeze()
+        if scale.ndim == 1:
+            scale = scale.reshape(-1, 1)
+    
+    print(f"Layer: {layer_key}, Scale shape: {scale.shape}")
+    
+    with open(output_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        # 写入头部注释供MATLAB读取
+        writer.writerow([f"# Layer: {layer_key}"])
+        writer.writerow([f"# Scale shape: {scale.shape}"])
+        writer.writerow([f"# Rows: output channels ({scale.shape[0]})"])
+        writer.writerow([f"# Cols: groups ({scale.shape[1] if scale.ndim > 1 else 1})"])
+        writer.writerow([])
+        # 写入数据
+        for row in scale:
+            writer.writerow(row.tolist() if isinstance(row, np.ndarray) else [row])
+    
+    print(f"Scale data saved to: {output_path}")
 
 
 def add_aq(model, args):
@@ -118,6 +156,15 @@ def main():
             else:
                 quantizers = gptq_utils.gptq_fwrd(model, trainloader, utils.DEV, args)
                 save_dict["w_quantizers"] = quantizers
+            
+            # 保存指定层的量化步长到CSV
+            rotation_tag = "with_rotate" if args.rotate else "no_rotate"
+            layer_name = "model.layers.31.mlp.down_proj.module"  # OPT-125m 第一层 fc2
+            
+            csv_filename = f"opt125m_fc2_scales_{rotation_tag}.csv"
+            csv_path = os.path.join(os.path.dirname(__file__), csv_filename)
+            
+            save_layer_scales_to_csv(quantizers, layer_name, csv_path)
         else: # RTN Weight Quantization
             quantizers = gptq_utils.rtn_fwrd(model, utils.DEV, args)
             save_dict["w_quantizers"] = quantizers

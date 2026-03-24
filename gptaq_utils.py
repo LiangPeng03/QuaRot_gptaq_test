@@ -105,6 +105,10 @@ class GPTAQ:
         if act_weights is not None:
             act_weights[dead] = 0  # dead通道的激活值幅度也置零
 
+        # 用于保存所有组的 scales 和 zeros
+        all_scales = []
+        all_zeros = []
+
         if static_groups:
             import copy
             groups = []
@@ -115,6 +119,9 @@ class GPTAQ:
                 else:
                     quantizer.find_params(W[:, i:(i + groupsize)], act_weights=None)
                 groups.append(quantizer)
+                # 保存每个组的 scale 和 zero
+                all_scales.append(quantizer.scale.cpu().clone())
+                all_zeros.append(quantizer.zero.cpu().clone())
 
         if actorder:
             perm = torch.argsort(torch.diag(H), descending=True)
@@ -167,6 +174,9 @@ class GPTAQ:
                                     W[:, (i1 + i):(i1 + i + groupsize)], 
                                     act_weights=None
                                 )
+                            # 保存每个组的 scale 和 zero
+                            all_scales.append(self.quantizer.scale.cpu().clone())
+                            all_zeros.append(self.quantizer.zero.cpu().clone())
                     else:
                         idx = i1 + i
                         if actorder:
@@ -190,6 +200,15 @@ class GPTAQ:
 
         if actorder:
             Q = Q[:, invperm]
+
+        # 将所有组的 scales 和 zeros 拼接并保存到 quantizer
+        if len(all_scales) > 0:
+            # 拼接所有 scales: [num_groups, out_channels] -> [out_channels, num_groups]
+            all_scales_tensor = torch.cat(all_scales, dim=1)  # [out_channels, num_groups]
+            all_zeros_tensor = torch.cat(all_zeros, dim=1)    # [out_channels, num_groups]
+            self.quantizer.scale = all_scales_tensor
+            self.quantizer.zero = all_zeros_tensor
+            print(f"Saved {len(all_scales)} group scales, final scale shape: {all_scales_tensor.shape}")
 
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
         if torch.any(torch.isnan(self.layer.weight.data)):
