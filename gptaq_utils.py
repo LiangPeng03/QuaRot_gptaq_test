@@ -108,6 +108,8 @@ class GPTAQ:
         # 用于保存所有组的 scales 和 zeros
         all_scales = []
         all_zeros = []
+        # 用于保存GPTQ更新后、量化前的权重组方差
+        group_weight_variances = []
 
         if static_groups:
             import copy
@@ -164,14 +166,18 @@ class GPTAQ:
                 if groupsize != -1:
                     if not static_groups:
                         if (i1 + i) % groupsize == 0:
+                            # 获取当前组的更新后权重（GPTQ更新后，量化前）
+                            w_group = W[:, (i1 + i):(i1 + i + groupsize)]
+                            # 计算该组更新后权重的方差
+                            group_weight_variances.append(w_group.var().item())
                             if act_weights is not None:
                                 self.quantizer.find_params(
-                                    W[:, (i1 + i):(i1 + i + groupsize)], 
+                                    w_group, 
                                     act_weights=act_weights[(i1 + i):(i1 + i + groupsize)]
                                 )
                             else:
                                 self.quantizer.find_params(
-                                    W[:, (i1 + i):(i1 + i + groupsize)], 
+                                    w_group, 
                                     act_weights=None
                                 )
                             # 保存每个组的 scale 和 zero
@@ -208,6 +214,7 @@ class GPTAQ:
             all_zeros_tensor = torch.cat(all_zeros, dim=1)    # [out_channels, num_groups]
             self.quantizer.scale = all_scales_tensor
             self.quantizer.zero = all_zeros_tensor
+            self.quantizer.group_weight_variances = group_weight_variances
             print(f"Saved {len(all_scales)} group scales, final scale shape: {all_scales_tensor.shape}")
 
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
@@ -301,6 +308,9 @@ def gptaq_fwrd(model, dataloader, dev, args):
     position_ids = cache.get('position_ids', None)
 
     quantizers = {}
+    
+    # 用于存储所有层fc2/down_proj的组统计信息
+    all_layers_group_stats = []
 
     # Define sequential layers based on model type
     if is_opt:
@@ -402,6 +412,24 @@ def gptaq_fwrd(model, dataloader, dev, args):
                     quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
                 else:
                     quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+                
+                # 收集fc2/down_proj的组统计信息
+                if 'fc2' in name or 'down_proj' in name:
+                    quantizer = gptq[name].quantizer
+                    if hasattr(quantizer, 'scale') and hasattr(quantizer, 'group_weight_variances'):
+                        scales = quantizer.scale.cpu().numpy()  # [out_channels, num_groups]
+                        weight_variances = quantizer.group_weight_variances
+                        num_groups = scales.shape[1]
+                        for g_idx in range(num_groups):
+                            avg_scale = float(scales[:, g_idx].mean())
+                            weight_var = weight_variances[g_idx]
+                            all_layers_group_stats.append({
+                                'layer': i,
+                                'group_idx': g_idx,
+                                'avg_scale': avg_scale,
+                                'weight_variance': weight_var
+                            })
+                
                 gptq[name].free()
 
         for j in range(args.nsamples):
@@ -419,6 +447,17 @@ def gptaq_fwrd(model, dataloader, dev, args):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    
+    # 保存所有层的组统计信息到CSV
+    if len(all_layers_group_stats) > 0:
+        import csv
+        csv_filename = 'llama3-8_scale_variance_rt.csv' if args.rotate else 'llama3-8_scale_variance.csv'
+        with open(csv_filename, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['layer', 'group_idx', 'avg_scale', 'weight_variance'])
+            writer.writeheader()
+            writer.writerows(all_layers_group_stats)
+        logging.info(f'Saved group stats to {csv_filename}, total records: {len(all_layers_group_stats)}')
+    
     utils.cleanup_memory(verbos=True)
     logging.info('-----GPTAQ Quantization Done-----\n')
 
