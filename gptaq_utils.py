@@ -343,6 +343,24 @@ def gptaq_fwrd(model, dataloader, dev, args):
     for i in range(len(layers)):
         print(f'\nLayer {i}:', flush=True, end=' ')
         layer = layers[i].to(dev)
+        
+        # ===== 单层量化模式：只量化第一层，其他层使用全精度推理 =====
+        if args.quant_first_layer_only and i > 0:
+            print('(FP inference only - not quantized)', flush=True)
+            # 全精度推理，不量化
+            for j in range(args.nsamples):
+                if is_opt:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                else:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            
+            layers[i] = layer.cpu()
+            del layer
+            torch.cuda.empty_cache()
+            inps, outs = outs, inps
+            continue  # 跳过后续量化流程
+        # ===== 单层量化模式结束 =====
+        
         full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
 
         bits_config = quant_utils.disable_act_quant(layer)
@@ -437,6 +455,56 @@ def gptaq_fwrd(model, dataloader, dev, args):
                 outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
             else:
                 outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+
+        # ===== 单层量化模式：保存第一层输入和输出 =====
+        if args.quant_first_layer_only and i == 0:
+            print(f'\n[INFO] Saving Layer 0 input/output for baseline comparison...')
+            
+            # 保存输入 (inps)
+            layer1_input = torch.stack([inps[j].cpu() for j in range(args.nsamples)])
+            torch.save({
+                'input': layer1_input,
+                'layer_idx': 0,
+                'model': args.model,
+                'w_bits': args.w_bits,
+                'w_groupsize': args.w_groupsize,
+                'rotate': args.rotate,
+                'description': 'First layer input for baseline comparison'
+            }, args.save_layer1_input)
+            print(f'[INFO] Layer 0 input saved to: {args.save_layer1_input}, shape: {layer1_input.shape}')
+            
+            # 保存输出 (outs)
+            layer1_output = torch.stack([outs[j].cpu() for j in range(args.nsamples)])
+            torch.save({
+                'output': layer1_output,
+                'layer_idx': 0,
+                'model': args.model,
+                'w_bits': args.w_bits,
+                'w_groupsize': args.w_groupsize,
+                'rotate': args.rotate,
+                'description': 'First layer quantized output for baseline comparison'
+            }, args.save_layer1_output)
+            print(f'[INFO] Layer 0 quantized output saved to: {args.save_layer1_output}, shape: {layer1_output.shape}')
+            
+            # 保存额外信息
+            info_dict = {
+                'layer_idx': 0,
+                'model': args.model,
+                'w_bits': args.w_bits,
+                'w_groupsize': args.w_groupsize,
+                'rotate': args.rotate,
+                'nsamples': args.nsamples,
+                'input_shape': list(layer1_input.shape),
+                'output_shape': list(layer1_output.shape),
+                'input_path': args.save_layer1_input,
+                'output_path': args.save_layer1_output
+            }
+            info_path = args.save_layer1_output.replace('.pt', '_info.txt')
+            with open(info_path, 'w') as f:
+                for key, value in info_dict.items():
+                    f.write(f'{key}: {value}\n')
+            print(f'[INFO] Layer info saved to: {info_path}')
+        # ===== 单层量化模式保存结束 =====
 
         fp_inputs_cache.clear_cache()
         layers[i] = layer.cpu()

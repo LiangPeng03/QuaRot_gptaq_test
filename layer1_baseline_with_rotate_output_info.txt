@@ -1,0 +1,10 @@
+layer_idx: 0
+model: meta-llama/Llama-2-7b-hf
+w_bits: 3
+w_groupsize: 256
+rotate: True
+nsamples: 128
+input_shape: [128, 2048, 4096]
+output_shape: [128, 2048, 4096]
+input_path: layer1_baseline_input.pt
+output_path: layer1_baseline_with_rotate_output.pt

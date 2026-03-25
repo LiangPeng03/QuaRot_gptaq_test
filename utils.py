@@ -182,6 +182,14 @@ def parser_gen():
                         help='Capture the input and output of the specified decoder layer and dump into a file')
     parser.add_argument('--layer_idx', type=int, default=10, help='Which decoder layer to capture')
 
+    # Single Layer Quantization for Baseline Comparison
+    parser.add_argument('--quant_first_layer_only', action='store_true', default=False,
+                        help='Only quantize the first layer (layer 0), use FP inference for remaining layers')
+    parser.add_argument('--save_layer1_output', type=str, default='layer1_baseline_output.pt',
+                        help='Path to save the first layer quantized output for baseline comparison')
+    parser.add_argument('--save_layer1_input', type=str, default='layer1_baseline_input.pt',
+                        help='Path to save the first layer input for baseline comparison')
+
     # LM Eval Arguments
     parser.add_argument("--lm_eval", action="store_true", help="Evaluate the model on LM Eval tasks.")
     parser.add_argument(
